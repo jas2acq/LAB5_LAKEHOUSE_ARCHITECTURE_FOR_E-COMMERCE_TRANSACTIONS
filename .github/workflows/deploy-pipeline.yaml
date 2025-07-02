@@ -115,17 +115,25 @@ jobs:
 
     - name: Package and Deploy Lambda Functions
       # Correctly packages lambda_function.py and deploys it directly into jobs/lambda/ in S3
+
       run: |
-        mkdir -p ./.tmp_lambda_package # Create a temporary directory for the zip file
+        # Define paths
+        PACKAGE_DIR=".tmp_lambda_package"
+        ZIP_NAME="lambda_function.zip"
+        SOURCE_FILE="jobs/lambda/lambda_function.py"
+        TARGET_BUCKET="lab5-cicd"
+        TARGET_KEY="jobs/lambda/${ZIP_NAME}"
 
-        # Package lambda_function.py
-        cd jobs/lambda
-        zip -r ../.tmp_lambda_package/lambda_function.zip lambda_function.py
-        cd ..
+        # Create temp directory at root level
+        mkdir -p "${PACKAGE_DIR}"
 
-        # Upload the zipped file to S3 under 'jobs/lambda/' prefix
-        aws s3 cp ./.tmp_lambda_package/lambda_function.zip s3://${{ env.LAKEHOUSE_BUCKET }}/jobs/lambda/lambda_function.zip
-        echo "Lambda package uploaded to S3: s3://${{ env.LAKEHOUSE_BUCKET }}/jobs/lambda/lambda_function.zip"
+        # Zip the Lambda function without changing directories
+        zip "${PACKAGE_DIR}/${ZIP_NAME}" "${SOURCE_FILE}"
+
+        # Upload to S3 (S3 will create the 'jobs/lambda/' prefix if it doesn't exist)
+        aws s3 cp "${PACKAGE_DIR}/${ZIP_NAME}" "s3://${TARGET_BUCKET}/${TARGET_KEY}"
+
+        echo "Lambda package uploaded to S3: s3://${TARGET_BUCKET}/${TARGET_KEY}"
 
     - name: Deploy Step Functions Definition
       # Correctly uses lab5_stepfunction.json and deploys under jobs/step_functions/ in S3
