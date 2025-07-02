@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import json
 from utility import process_monthly_excel_file_with_sheet_tracking, s3_read_json, s3_write_json
+
 class S3LogHandler:
     def __init__(self, bucket, log_key_prefix):
         self.bucket = bucket
@@ -10,18 +11,23 @@ class S3LogHandler:
         self.s3 = boto3.client('s3')
         self.log_buffer = []
         self.job_start_time = datetime.utcnow().strftime('%Y-%m-%d_%H-%M-%S')
+    
     def log(self, level, message):
         """Add log entry to buffer"""
         timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         log_entry = f"{timestamp} {level}: {message}"
         self.log_buffer.append(log_entry)
         print(log_entry)  # Also print to CloudWatch
+    
     def info(self, message):
         self.log(level="INFO", message=message)
+    
     def error(self, message):
         self.log(level="ERROR", message=message)
+    
     def warning(self, message):
         self.log(level="WARNING", message=message)
+    
     def upload_logs(self, append=True):
         """Upload buffered logs to S3"""
         if not self.log_buffer:
@@ -46,19 +52,24 @@ class S3LogHandler:
             self.log_buffer.clear()
         except Exception as e:
             print(f"Failed to upload logs to S3: {e}")
+
 # Setup custom logging
 s3_logger = S3LogHandler(bucket='lab5-cicd', log_key_prefix='logs')
+
 # Setup standard logging for CloudWatch
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
+
 # S3 clients and buckets
 s3 = boto3.client('s3')
 SOURCE_BUCKET = 'lab5-source-data'
 DEST_BUCKET = 'lab5-cicd'
 RAW_PREFIX = 'raw'
 STATE_PREFIX = 'state'
+ARCHIVE_PREFIX = 'archived'
 PROCESSED_REGISTRY_S3_URI = f's3://{DEST_BUCKET}/{STATE_PREFIX}/processed_files.json'
 PROCESSED_IDS_S3_PREFIX = f's3://{DEST_BUCKET}/{STATE_PREFIX}/processed_ids'
+
 def list_source_files():
     """List all files in the source S3 bucket."""
     paginator = s3.get_paginator('list_objects_v2')
@@ -69,6 +80,30 @@ def list_source_files():
             for obj in page['Contents']:
                 files.append(obj['Key'])
     return files
+
+def archive_file(source_bucket, source_key):
+    """Archive a file by copying to destination. The original file is NOT deleted."""
+    try:
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        filename = source_key.split('/')[-1]
+        archive_key = f"{ARCHIVE_PREFIX}/{timestamp}/{filename}"
+        
+        s3_logger.info(f"Archiving s3://{source_bucket}/{source_key} to s3://{DEST_BUCKET}/{archive_key}")
+        s3.copy_object(
+            Bucket=DEST_BUCKET,
+            Key=archive_key,
+            CopySource={'Bucket': source_bucket, 'Key': source_key}
+        )
+        
+        # REMOVED: s3_logger.info(f"Deleting original file s3://{source_bucket}/{source_key}")
+        # REMOVED: s3.delete_object(Bucket=source_bucket, Key=source_key)
+        
+        s3_logger.info(f"Successfully archived {filename} to s3://{DEST_BUCKET}/{archive_key}. Original file retained.")
+        return True
+    except Exception as e:
+        s3_logger.error(f"Failed to archive s3://{source_bucket}/{source_key}: {e}")
+        return False
+
 def process_csv_file_in_glue(csv_bytes, filename):
     """Process CSV file using utility function."""
     try:
@@ -94,6 +129,7 @@ def process_csv_file_in_glue(csv_bytes, filename):
     except Exception as e:
         s3_logger.error(f"Error processing CSV file {filename}: {e}")
         return False
+
 def process_excel_file_in_glue(bucket, key):
     """Process Excel file using utility function."""
     try:
@@ -112,6 +148,7 @@ def process_excel_file_in_glue(bucket, key):
     except Exception as e:
         s3_logger.error(f"Error processing Excel file {key}: {e}")
         return False
+
 def is_file_completely_processed(filename, processed_registry):
     """Check if a file has been completely processed."""
     if filename not in processed_registry:
@@ -120,6 +157,7 @@ def is_file_completely_processed(filename, processed_registry):
         return True
     processed_sheets = processed_registry.get(filename, [])
     return len(processed_sheets) > 0
+
 def main():
     """Main processing function."""
     try:
@@ -168,7 +206,13 @@ def main():
                 skipped_count += 1
                 continue
             if success:
-                processed_count += 1
+                # Archive the file after successful processing
+                # The archive_file function no longer deletes the source file
+                if archive_file(SOURCE_BUCKET, key):
+                    processed_count += 1
+                else:
+                    s3_logger.error(f"Failed to archive {filename}, marking as failed")
+                    failed_count += 1
             else:
                 failed_count += 1
             # Upload logs periodically
@@ -181,5 +225,6 @@ def main():
         s3_logger.error(f"Critical error in main processing: {e}")
         s3_logger.upload_logs(append=True)
         raise
+
 if __name__ == '__main__':
     main()

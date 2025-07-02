@@ -1,0 +1,265 @@
+{
+    "Comment": "Lakehouse ETL Workflow triggered by S3 event via Lambda.",
+    "StartAt": "InitializeInput",
+    "States": {
+        "InitializeInput": {
+            "Type": "Pass",
+            "ResultPath": "$.originalInput",
+            "Parameters": {
+                "s3Event.$": "$.s3Event"
+            },
+            "Next": "StartExtractJob"
+        },
+        "StartExtractJob": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+                "JobName": "Extract_data",
+                "Arguments": {
+                    "--JOB_NAME": "Extract_data",
+                    "--S3_BUCKET.$": "$.originalInput.s3Event.bucket",
+                    "--S3_KEY.$": "$.originalInput.s3Event.key"
+                }
+            },
+            "ResultPath": "$.glueExtractResult",
+            "Next": "StartTransformJob",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "HandleFailure"
+                }
+            ],
+            "TimeoutSeconds": 3600
+        },
+        "StartTransformJob": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+                "JobName": "Transform_data",
+                "Arguments": {
+                    "--JOB_NAME": "Transform_data",
+                    "--S3_BUCKET.$": "$.originalInput.s3Event.bucket",
+                    "--S3_KEY.$": "$.originalInput.s3Event.key"
+                }
+            },
+            "ResultPath": "$.glueTransformResult",
+            "Next": "RunGlueCrawler",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "HandleFailure"
+                }
+            ],
+            "TimeoutSeconds": 3600
+        },
+        "RunGlueCrawler": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+            "Parameters": {
+                "Name": "lab5_crawler"
+            },
+            "ResultPath": "$.runCrawlerResult",
+            "Next": "WaitForCrawlerCompletion",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "HandleFailure"
+                }
+            ],
+            "TimeoutSeconds": 1800
+        },
+        "WaitForCrawlerCompletion": {
+            "Type": "Wait",
+            "Seconds": 60,
+            "Next": "CheckCrawlerStatus"
+        },
+        "CheckCrawlerStatus": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+            "Parameters": {
+                "Name": "lab5_crawler"
+            },
+            "ResultPath": "$.crawlerStatus",
+            "Next": "EvaluateCrawlerStatus",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "HandleFailure"
+                }
+            ]
+        },
+        "EvaluateCrawlerStatus": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.crawlerStatus.Crawler.State",
+                    "StringEquals": "READY",
+                    "Next": "ValidateDataPresence"
+                },
+                {
+                    "Variable": "$.crawlerStatus.Crawler.State",
+                    "StringEquals": "RUNNING",
+                    "Next": "WaitForCrawlerCompletion"
+                },
+                {
+                    "Variable": "$.crawlerStatus.Crawler.State",
+                    "StringEquals": "STOPPING",
+                    "Next": "WaitForCrawlerCompletion"
+                }
+            ],
+            "Default": "SetCrawlerDefaultErrorForSNS"
+        },
+        "ValidateDataPresence": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+            "Parameters": {
+                "QueryExecutionContext": {
+                    "Database": "lab5_processed_data"
+                },
+                "QueryString": "SELECT COUNT(*) as record_count FROM lab5_processed_data.orders",
+                "ResultConfiguration": {
+                    "OutputLocation": "s3://lab5-cicd/athena-results/"
+                }
+            },
+            "ResultPath": "$.athenaResult",
+            "Next": "CheckQueryResults",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "HandleFailure"
+                }
+            ],
+            "TimeoutSeconds": 600
+        },
+        "CheckQueryResults": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:athena:getQueryResults",
+            "Parameters": {
+                "QueryExecutionId.$": "$.athenaResult.QueryExecution.QueryExecutionId"
+            },
+            "ResultPath": "$.queryResults",
+            "Next": "EvaluateResults",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "HandleFailure"
+                }
+            ]
+        },
+        "EvaluateResults": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.queryResults.ResultSet.Rows[1].Data[0].VarCharValue",
+                    "StringEquals": "0",
+                    "Next": "SetQueryDefaultErrorForSNS"
+                },
+                {
+                    "Variable": "$.queryResults.ResultSet.Rows[1].Data[0].VarCharValue",
+                    "IsPresent": true,
+                    "Next": "NotifySuccess"
+                }
+            ],
+            "Default": "SetQueryDefaultErrorForSNS"
+        },
+        "SetCrawlerDefaultErrorForSNS": {
+            "Type": "Pass",
+            "InputPath": "$",
+            "ResultPath": "$.error",
+            "Parameters": {
+                "Error": "CrawlerStateIssue",
+                "Cause.$": "States.Format('Glue Crawler did not reach READY state after repeated polling. Current state: {}.', $.crawlerStatus.Crawler.State)"
+            },
+            "Next": "HandleFailure"
+        },
+        "SetQueryDefaultErrorForSNS": {
+            "Type": "Pass",
+            "InputPath": "$",
+            "ResultPath": "$.error",
+            "Parameters": {
+                "Error": "DataValidationFailed",
+                "Cause.$": "States.Format('Athena query for data validation failed or returned zero records. Record count: {}.', $.queryResults.ResultSet.Rows[1].Data[0].VarCharValue)"
+            },
+            "Next": "HandleFailure"
+        },
+        "NotifySuccess": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Parameters": {
+                "TopicArn": "arn:aws:sns:eu-north-1:476114131873:Lab_5",
+                "Subject": "Lakehouse ETL Pipeline - Success",
+                "Message": {
+                    "Status": "SUCCESS",
+                    "Message": "Lakehouse ETL pipeline completed successfully",
+                    "ProcessedFile": {
+                        "Bucket.$": "$.originalInput.s3Event.bucket",
+                        "Key.$": "$.originalInput.s3Event.key"
+                    },
+                    "RecordCount.$": "$.queryResults.ResultSet.Rows[1].Data[0].VarCharValue",
+                    "CompletedAt.$": "$$.State.EnteredTime"
+                }
+            },
+            "Next": "Success",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "Next": "Success"
+                }
+            ]
+        },
+        "HandleFailure": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Parameters": {
+                "TopicArn": "arn:aws:sns:eu-north-1:476114131873:Lab_5",
+                "Subject": "Lakehouse ETL Pipeline - Failure",
+                "Message": {
+                    "Status": "FAILED",
+                    "Message": "Lakehouse ETL pipeline failed",
+                    "ProcessedFile": {
+                        "Bucket.$": "$.originalInput.s3Event.bucket",
+                        "Key.$": "$.originalInput.s3Event.key"
+                    },
+                    "Error.$": "$.error.Error",
+                    "Cause.$": "$.error.Cause",
+                    "FailedAt.$": "$$.State.EnteredTime"
+                }
+            },
+            "Next": "Fail",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "Next": "Fail"
+                }
+            ]
+        },
+        "Success": {
+            "Type": "Succeed"
+        },
+        "Fail": {
+            "Type": "Fail"
+        }
+    }
+}
