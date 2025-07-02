@@ -95,8 +95,7 @@ def archive_file(source_bucket, source_key):
             CopySource={'Bucket': source_bucket, 'Key': source_key}
         )
         
-        # REMOVED: s3_logger.info(f"Deleting original file s3://{source_bucket}/{source_key}")
-        # REMOVED: s3.delete_object(Bucket=source_bucket, Key=source_key)
+
         
         s3_logger.info(f"Successfully archived {filename} to s3://{DEST_BUCKET}/{archive_key}. Original file retained.")
         return True
@@ -207,7 +206,6 @@ def main():
                 continue
             if success:
                 # Archive the file after successful processing
-                # The archive_file function no longer deletes the source file
                 if archive_file(SOURCE_BUCKET, key):
                     processed_count += 1
                 else:
