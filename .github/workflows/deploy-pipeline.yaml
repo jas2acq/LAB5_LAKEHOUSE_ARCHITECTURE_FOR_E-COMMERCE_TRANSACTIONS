@@ -141,7 +141,7 @@ jobs:
         if [ -f "jobs/step_functions/lab5_stepfunction.json" ]; then
           echo "Uploading Step Functions definition..."
           # Deploy Step Functions definition under 'jobs/step_functions/' prefix
-          aws s3 cp step_functions/lab5_stepfunction.json s3://${{ env.LAKEHOUSE_BUCKET }}/jobs/step_functions/lab5_stepfunction.json
+          aws s3 cp jobs/step_functions/lab5_stepfunction.json s3://${{ env.LAKEHOUSE_BUCKET }}/jobs/step_functions/lab5_stepfunction.json
           echo "Step Functions definition uploaded"
         else
           echo "Step Functions definition not found (will create later)"
