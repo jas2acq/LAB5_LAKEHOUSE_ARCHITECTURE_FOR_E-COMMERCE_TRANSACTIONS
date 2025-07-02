@@ -138,7 +138,7 @@ jobs:
     - name: Deploy Step Functions Definition
       # Correctly uses lab5_stepfunction.json and deploys under jobs/step_functions/ in S3
       run: |
-        if [ -f "step_functions/lab5_stepfunction.json" ]; then
+        if [ -f "jobs/step_functions/lab5_stepfunction.json" ]; then
           echo "Uploading Step Functions definition..."
           # Deploy Step Functions definition under 'jobs/step_functions/' prefix
           aws s3 cp step_functions/lab5_stepfunction.json s3://${{ env.LAKEHOUSE_BUCKET }}/jobs/step_functions/lab5_stepfunction.json
